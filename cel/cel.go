@@ -1,10 +1,12 @@
-package main
+package cel
 
 import (
 	"errors"
 	"fmt"
 	"github.com/google/cel-go/cel"
+	"github.com/google/cel-go/common/types"
 	"github.com/google/cel-go/common/types/ref"
+	"github.com/google/cel-go/common/types/traits"
 	"github.com/google/cel-go/ext"
 	"reflect"
 	"sync"
@@ -14,7 +16,7 @@ import (
 type CelConf struct {
 	sync.Mutex
 	celEnv *cel.Env  // cel变量处理
-	celFields map[string]*cel.Type  // 1、用于普通变量注册  TODO:2、结构体变量注册
+	celFields map[string]*cel.Type  // 1、用于普通变量注册  2、结构体变量注册
 	celFunc  []cel.EnvOption // TODO:1、函数方法注册
 }
 
@@ -22,6 +24,30 @@ var celConf = CelConf{
 	celFields: map[string]*cel.Type{
 		"M":cel.IntType,
 		"N":cel.IntType,
+	},
+	celFunc: []cel.EnvOption{
+		// 求和
+		cel.Function("sum",
+			cel.MemberOverload("list_int_sum", []*cel.Type{cel.ListType(cel.IntType)},
+				cel.IntType, cel.UnaryBinding(func(value ref.Val) ref.Val {
+					list, ok := value.(traits.Lister)
+					if !ok {
+						return types.IntNegOne
+					}
+					size, ok := list.Size().Value().(int64)
+					if !ok {
+						return types.IntNegOne
+					}
+					res := 0
+					for i := 0; i < int(size); i++ {
+						v, ok := list.Get(types.Int(i)).Value().(int64)
+						if !ok {
+							v = 0
+						}
+						res += int(v)
+					}
+					return types.Int(res)
+				}))),
 	},
 }
 
@@ -33,7 +59,7 @@ func InitCleConf()  error{
 	for key, val := range celConf.celFields {
 		opts = append(opts, cel.Variable(key, val))
 	}
-	opts = append(opts,celConf.celFunc...)
+	opts = append(opts, celConf.celFunc...)
 	celConf.celEnv, err = cel.NewEnv(opts...)
 	if err != nil {
 		return err
@@ -100,17 +126,18 @@ func calculate(str string, varsMap map[string]interface{}) (ref.Val, error) {
 		val := v
 		if _, ok := celConf.celFields[key]; !ok {
 			tp := reflect.TypeOf(val)
-			var opt cel.EnvOption
+			var opt []cel.EnvOption
 			if tp.Kind() == reflect.Struct {
-				opt = ext.NativeTypes(reflect.TypeOf(val))
+				opt = append(opt, ext.NativeTypes(reflect.TypeOf(val)), cel.Variable(key, cel.ObjectType(tp.String())))
+
 			} else {
 				ctp, err := TypeToCELType(tp)
 				if err != nil {
 					continue
 				}
-				opt = cel.Variable(key, ctp)
+				opt = append(opt, cel.Variable(key, ctp))
 			}
-			extEnv, err := defaultEnv.Extend(opt)
+			extEnv, err := defaultEnv.Extend(opt...)
 			if err != nil {
 				continue
 			} else {
@@ -137,4 +164,16 @@ func calculate(str string, varsMap map[string]interface{}) (ref.Val, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+// RegisterFunc 注册方法
+func RegisterFunc(opts ...cel.EnvOption) {
+	celConf.Lock()
+	defer celConf.Unlock()
+	celConf.celFunc = append(celConf.celFunc, opts...)
+}
+
+type Student struct {
+	Age int32
+	AgeRes string
 }
